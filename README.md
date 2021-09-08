@@ -8,7 +8,7 @@ Step 1 : Recover Radmin Server 3 user information from `HKEY_LOCAL_MACHINE\SOFTW
 
 Step 2 : Run `python3 hash_dumper.py regkey.txt` on the key you want to extract data from. You can supply a wordlist directly using `--wordlist ./test.txt` if you want to bruteforce the password, but this will be very slow.
 
-̀```bash
+```bash
 $ python3 hash_dumper.py regkey.txt
 Username : b'jonathan'
 Modulus : 9847fc7e0f891dfd5d02f19d587d8f77aec0b980d4304b0113b406f23e2cec58cafca04a53e36fb68e0c3bff92cf335786b0dbe60dfe4178ef2fcd2a4dd09947ffd8df96fd0f9e2981a32da95503342eca9f08062cbdd4ac2d7cdf810db4db96db70102266261cd3f8bdd56a102fc6ceedbba5eae99e6127bdd952f7a0d18a79021c881ae63ec4b3590387f548598f2cb8f90dea36fc4f80c5473fdb6b0c6bdb0fdbaf4601f560dd149167ea125db8ad34fd0fd45350dec72cfb3b528ba2332d6091acea89dfd06c9c4d18f697245bd2ac9278b92bfe7dbafaa0c43b40a71f1930ebc4fd24c9e5a2e5a4ccf5d7f51544d70b2bca4af5b8d37b379fd7740a682f
@@ -21,7 +21,7 @@ Step 3 : For a faster password bruteforce, paste the username, salt and verifier
 
 Step 4 : Run the binary with a wordlist file name as first argument : `./radmin3_bf ./test.txt`.
 
-̀```bash
+```bash
 $ ./radmin3_bf test.txt 
 Building big cache 1 / 10...
 Building big cache 2 / 10...
