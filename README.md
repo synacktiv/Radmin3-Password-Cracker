@@ -17,7 +17,7 @@ Salt : 16257c8778bc06b36d358a2158eb2689f484d0a25742050c5badef0af3a6d283
 Verifier : 1aea28ecfa04940964396bfdb2f3e2021c761982d198baabe7668fdf661be1b03653bd2a69241710f1cc492cf7f47a453ea6c0c7dfb25327e2c07ba9b5c68130eeff5b15c5df1d87f4a3d9675a6ff19430eab76fffb16855b58372d8d5cfbf422a67d304e5586017b89e52c9176664eb61fed2a4d43ca4d9fc33cd7e8ab015764e6a3894afadebf987db36e1b0487b83598602b49c91e26b51ccd89c719cf9644f89fae5a69f7b4dc73ac5e8b7ebf1e02e7c497359207f241431fc257c5c995699a4ccb626d015859a7027aafdf008044ec70521def1d59c43dde0644777dc51bb39175920a0f6040d9167f68569573b70390c729ad430d66e779ab81cb1a88a
 ```
 
-Step 3 : For a faster password bruteforce, paste the username, salt and verifier extracted by the python script into the constants of the `radmin3_bf.c` file. Compile the file with `g++ -o radmin3_bf -O3 radmin3_bf.c -lssl -lcrypto`.
+Step 3 : For a faster password bruteforce, paste the username, salt and verifier extracted by the python script into the constants of the `radmin3_bf.c` file. Compile the file with `g++ -o radmin3_bf -O3 radmin3_bf.c -lssl -lcrypto -lpthread`.
 
 Step 4 : Run the binary with a wordlist file name as first argument : `./radmin3_bf ./test.txt`.
 
