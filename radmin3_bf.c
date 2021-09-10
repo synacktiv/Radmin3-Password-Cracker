@@ -1,7 +1,7 @@
 /*
  * BF hash passwords for radmin
- * g++ -o radmin3_bf -O0 -ggdb -fsanitize=address -fno-omit-frame-pointer radmin_srp_bf.c -lssl -lcrypto
- * g++ -o radmin3_bf -O3 radmin3_bf.c -lssl -lcrypto 
+ * g++ -o radmin3_bf -O0 -ggdb -fsanitize=address -fno-omit-frame-pointer radmin3_bf.c -lssl -lcrypto -lpthread
+ * g++ -o radmin3_bf -O3 radmin3_bf.c -lssl -lcrypto -lpthread
  */
 
 #include <stdio.h>
@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <sys/time.h>
 #include <arpa/inet.h> 
+#include <unistd.h> 
 
 #define GENERATOR_HEXSTR "5"
 #define SALT_HEXSTR "16257c8778bc06b36d358a2158eb2689f484d0a25742050c5badef0af3a6d283"
@@ -25,33 +26,47 @@ unsigned char username[] = "jonathan";
 #define CHUNK_NUM (160/CHUNK_LEN)
 #define CHUNK_POP (1<<CHUNK_LEN)
 
+#define NUM_THREADS 8
+#define BATCH_SIZE 10000
+
 /* NO CHANGING BELOW */
+
+char batch_buffers[NUM_THREADS][BATCH_SIZE][0x100];
+unsigned char active_threads[NUM_THREADS];
+pthread_t threads[NUM_THREADS];
+char was_password_found;
+char found_password[256];
 
 struct timeval stop, start;
 
 static size_t size_username = sizeof(username)-1;
 
 BIGNUM* cache[160];
-
 BIGNUM* bigcache[160/CHUNK_LEN*CHUNK_POP];
 
-BN_MONT_CTX * mont_ctx;
+BN_MONT_CTX* thread_mont_ctx[NUM_THREADS];
+BN_CTX *thread_ctx[NUM_THREADS];
+
+unsigned char *salt;
+size_t size_salt;
+BIGNUM *hash;
+BIGNUM *modulus;
+BIGNUM *base;
+
 
 // Cache values for faster mod_exp
-static void cache_exp(BIGNUM *base,BIGNUM *modulus,BN_CTX *ctx)
+static void cache_exp(BIGNUM *base,BIGNUM *modulus,BN_CTX *ctx, BN_MONT_CTX *mont_ctx)
 {
 	BIGNUM *TWO = BN_new();
 	unsigned int two = htonl(2);
 	BN_bin2bn( (unsigned char *) &two, sizeof(two), TWO);
-
-	mont_ctx = BN_MONT_CTX_new();
-	BN_MONT_CTX_set(mont_ctx,modulus,ctx);
 	
+	BIGNUM *x = BN_new();
+	BIGNUM *I = BN_new();
+
 	for(unsigned int i=0;i<160;i++)
 	{
 		BIGNUM *c = BN_new();
-		BIGNUM *x = BN_new();
-		BIGNUM *I = BN_new();
 
 		unsigned int ii = htonl(i);
 		BN_bin2bn( (unsigned char *) &ii, sizeof(ii), I);
@@ -66,7 +81,10 @@ static void cache_exp(BIGNUM *base,BIGNUM *modulus,BN_CTX *ctx)
 		BN_to_montgomery(c,c,mont_ctx,ctx);
 
 		cache[i]=c;
+
 	}
+	BN_free(x);
+	BN_free(I);
 }
 
 //Faster mod_exp
@@ -75,7 +93,7 @@ static int custom_exp(
 		BIGNUM *base,
 		BIGNUM *x,
 		BIGNUM *modulus,
-		BN_CTX *ctx) {
+		BN_CTX *ctx, BN_MONT_CTX *mont_ctx) {
 	
 	unsigned int one = htonl(1);
 	BN_bin2bn( (unsigned char *) &one, sizeof(one), out);
@@ -96,28 +114,31 @@ static int custom_exp(
 
 static BIGNUM* MIL;
 // Cache more values for even faster mod_exp
-static void bigcache_exp(BIGNUM *base,BIGNUM *modulus,BN_CTX *ctx)
+static void bigcache_exp(BIGNUM *base,BIGNUM *modulus,BN_CTX *ctx, BN_MONT_CTX *mont_ctx)
 {
+	BIGNUM *J = BN_new();
 	for(unsigned int i=0;i<CHUNK_NUM;i++)
 	{
 		printf("Building big cache %d / %d...\n",i+1,CHUNK_NUM);
 		for(unsigned int j=0;j<CHUNK_POP;j++)
 		{
 			BIGNUM *c = BN_new();
-			BIGNUM *J = BN_new();
+			
 
 			unsigned int jj = htonl(j);
 			BN_bin2bn( (unsigned char *) &jj, sizeof(jj), J);
 			
 			BN_lshift(J,J,(CHUNK_NUM-1-i)*CHUNK_LEN);
 			
-			custom_exp(c,base,J,modulus,ctx);
+			custom_exp(c,base,J,modulus,ctx,mont_ctx);
 
 			BN_to_montgomery(c,c,mont_ctx,ctx);
 
 			bigcache[i*CHUNK_POP+j]=c;
+			
 		}
 	}
+	BN_free(J);
 	MIL = BN_new();
 	unsigned int mil = htonl(CHUNK_POP);
 	BN_bin2bn( (unsigned char *) &mil, sizeof(mil), MIL);
@@ -129,7 +150,8 @@ static int custom_exp2(
 		BIGNUM *base,
 		BIGNUM *x,
 		BIGNUM *modulus,
-		BN_CTX *ctx) {
+		BN_CTX *ctx,
+		BN_MONT_CTX *mont_ctx) {
 	
 	unsigned int one = htonl(1);
 	BN_bin2bn( (unsigned char *) &one, sizeof(one), out);
@@ -137,16 +159,19 @@ static int custom_exp2(
 	BN_to_montgomery(out,out,mont_ctx,ctx);
 
 	unsigned int idx;
+	BIGNUM *xc = BN_new();
 	for(int i=0;i<CHUNK_NUM;i++)
 	{
-		BIGNUM *xc = BN_new();
+		
 		BN_rshift(xc,x,160-((i+1)*CHUNK_LEN));
 		BN_mod(xc,xc,MIL,ctx);
 		
 		BN_bn2binpad(xc, (unsigned char *)&idx, 4);
+		
 		idx = htonl(idx);
 		BN_mod_mul_montgomery(out,out,bigcache[i*CHUNK_POP+idx],mont_ctx,ctx);
 	}
+	BN_free(xc);
 	BN_from_montgomery(out,out,mont_ctx,ctx);
 
 	return 0;
@@ -158,7 +183,8 @@ static int test_password(
 		BIGNUM *modulus,
 		BIGNUM *base,
 		BIGNUM *hash,
-		BN_CTX *ctx) {
+		BN_CTX *ctx,
+		BN_MONT_CTX *mont_ctx) {
 
 	// first hash
 	unsigned char concat[254];
@@ -218,7 +244,7 @@ static int test_password(
 	}
 	else // 5 times faster !
 	{
-		custom_exp2(res3,base,x,modulus,ctx);
+		custom_exp2(res3,base,x,modulus,ctx,mont_ctx);
 	}
 
 	// is this it?
@@ -231,6 +257,30 @@ static int test_password(
 	return found;
 }
 
+
+
+void* process_batch(void* arg){
+  
+	int thread_num = *(int*)arg;
+	free(arg);
+	for(int i=0; i<BATCH_SIZE; i+=1)
+	{
+		if(was_password_found)break;
+		if(strlen(batch_buffers[thread_num][i])>0)
+		{
+			if (test_password((unsigned char*) (batch_buffers[thread_num][i]), salt, size_salt, modulus, base, hash, thread_ctx[thread_num], thread_mont_ctx[thread_num]) == 1) {
+				strncpy(found_password,batch_buffers[thread_num][i],256);
+				was_password_found = 1;
+				break;
+			}
+		}
+	}
+
+	active_threads[thread_num]=0;
+	void* dummy;
+	pthread_exit(dummy);
+}
+
 int main(int argc, char **argv) {
 
 	if (argc < 2) {
@@ -240,11 +290,9 @@ int main(int argc, char **argv) {
 
 	char *wordlist = argv[1];
 
-	unsigned char *salt = NULL;
-	BIGNUM *hash = NULL;
-	BIGNUM *modulus = NULL;
-	BIGNUM *base = NULL;
-	BN_CTX *ctx = BN_CTX_new();
+	BN_MONT_CTX *mont_ctx;
+	BN_CTX *ctx;
+
 
 	if (BN_hex2bn(&hash, VERIFIER_HEXSTR) == 0) {
 		printf("Failed to convert hash hexstring to BIGNUM\n"); return 1;
@@ -259,7 +307,7 @@ int main(int argc, char **argv) {
 	}
 
 	salt = OPENSSL_hexstr2buf(SALT_HEXSTR, NULL);
-	size_t size_salt = strlen(SALT_HEXSTR) / 2;
+	size_salt = strlen(SALT_HEXSTR) / 2;
 
 	FILE *fp;
 	char *c = NULL;
@@ -275,27 +323,96 @@ int main(int argc, char **argv) {
 			exit(EXIT_FAILURE);
 	}
 
-	cache_exp(base,modulus,ctx);
-	bigcache_exp(base,modulus,ctx);
+
+	ctx = BN_CTX_new();
+	mont_ctx = BN_MONT_CTX_new();
+	BN_MONT_CTX_set(mont_ctx,modulus,ctx);
+	for(int thread_num=0; thread_num<NUM_THREADS; thread_num++)
+	{
+		threads[thread_num] = -1;
+		active_threads[thread_num] = 0;
+		thread_ctx[thread_num] = BN_CTX_new();
+		thread_mont_ctx[thread_num] = BN_MONT_CTX_new();
+		BN_MONT_CTX_set(thread_mont_ctx[thread_num],modulus,thread_ctx[thread_num]);
+	}
+	was_password_found=0;
+	memset(found_password,0,256);
+
+	cache_exp(base,modulus,ctx,mont_ctx);
+	bigcache_exp(base,modulus,ctx,mont_ctx);
 
 	int i = 0;
 
 	gettimeofday(&start, NULL);
 
-	while ((read = getline(&c, &len, fp)) != -1) {
+	unsigned long long total_processed = 0;
+	unsigned char over = 0;
+	while(!over)
+	{
+		for(long long thread_num=0; thread_num<NUM_THREADS; thread_num++)
+		{
+			if(was_password_found || over)
+			{
+				over = 1;
+				break;
+			}
+			if(!active_threads[thread_num])
+			{
+				if(threads[thread_num]!=-1)
+				{
+					void* dummy;
+					pthread_join(threads[thread_num],&dummy);
+					threads[thread_num]=0;
+					total_processed+=BATCH_SIZE;
+					printf("Processed %lld candidates\n", total_processed);
+				}
+				for(int i=0;i<BATCH_SIZE;i++)
+				{
+					memset(batch_buffers[thread_num][i],0,256);
+				}
+				int idx = 0;
+				while(idx<BATCH_SIZE)
+				{
+					read = getline(&c, &len, fp);
+					if(read == -1)
+					{
+						over = 1;
+						break;
+					}
+					c[read-1] = '\x00'; // dirty trim '\n'
+					if(read>256)continue;
+					strncpy(batch_buffers[thread_num][idx],c,256);
+					idx+=1;
+				}
 
-		c[read-1] = '\x00'; // dirty trim '\n'
-
-		if (i % 5000 == 0 && i>0)
-			printf("%d words processed\n", i);
-
-		if (test_password((unsigned char*) c, salt, size_salt, modulus, base, hash, ctx) == 1) {
-			printf("\n\nFound ! %s\n\n", c);
-			break;
+				void *arg = malloc(sizeof(int));
+				*(int*)arg = thread_num;
+				pthread_create(&threads[thread_num], NULL, process_batch, arg);
+			}
 		}
-
-		i++;
+		usleep(1000);
 	}
+
+	for(int thread_num=0; thread_num<NUM_THREADS; thread_num++)
+	{
+		if(threads[thread_num]!=-1)
+		{
+			void* dummy;
+			pthread_join(threads[thread_num], &dummy);
+			threads[thread_num]=0;
+		}
+		
+	}
+
+	if(was_password_found)
+	{
+		printf("\n\nFound password : %s\n\n", &found_password);
+	}
+	else
+	{
+		printf("\n\nNo password found.\n\n");
+	}
+	
 
 	gettimeofday(&stop, NULL);
 	printf("took %lu ms\n", (stop.tv_sec - start.tv_sec) * 1000 + (stop.tv_usec - start.tv_usec)/1000); 
@@ -305,6 +422,11 @@ int main(int argc, char **argv) {
 	BN_free(base);
 	BN_MONT_CTX_free(mont_ctx);
 	BN_CTX_free(ctx);
+	for(int thread_num=0; thread_num<NUM_THREADS; thread_num++)
+	{
+		BN_MONT_CTX_free(thread_mont_ctx[thread_num]);
+		BN_CTX_free(thread_ctx[thread_num]);
+	}
 	OPENSSL_free(salt);
 	
 	return 0;
