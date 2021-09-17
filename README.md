@@ -1,6 +1,6 @@
 # Radmin Server 3 Dumper/Cracker
 
-For more context about this tool, see TODO !
+For more context about this tool, see https://www.synacktiv.com/publications/cracking-radmin-server-3-passwords.html !
 
 ## How to use :
 
